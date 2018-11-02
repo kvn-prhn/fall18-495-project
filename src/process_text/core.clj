@@ -74,7 +74,7 @@
 (defn wcount-merge
 	"given a list of word count maps, merge them all together and sum counts"
 	[wlists]
-	(println wlists)
+	;(println wlists)
 	(reduce 
 		(fn [wlist1 wlist2] 
 			(loop [result wlist1 q wlist2]
@@ -178,7 +178,7 @@
 		  ) documentBowsIndices)
 	  ]
 	  (println "n =" n)
-	  (println "piDocGenByTopic: " piDocGenByTopic)
+	  ;(println "piDocGenByTopic: " piDocGenByTopic)
 	  ;(println "topicModels: " topicModels)
 	  (let 
 	    [ 
@@ -337,94 +337,163 @@
 )
 
 
+(defn write-language-model 
+	"given a file name and a language model as a probability distribution,
+	 write the data in the model to file. An additional description line is added."
+	[fname m desc]
+	(println "Writing to " fname)
+	(with-open [w (clojure.java.io/writer fname)]
+	  (.write w "#comment# ") 
+	  (.write w desc) 
+	  (.write w "\n") 
+	  (loop [i 0]
+		(if (>= i (count (keys m)))
+		  (.close w)
+		  (do 
+			(.write w (str (nth (keys m) i))) 
+			(.write w ",") 
+			(.write w (str (get m (nth (keys m) i))) )
+			(.write w "\n")
+		  (recur (inc i)))
+		)
+	))
+)
+
+
+(defn read-language-model 
+  "given a file name, read and write the langauge model to file."
+  [fname]
+  (with-open [rdr (clojure.java.io/reader fname)]
+	(loop [m {}]
+	  (let [nextLine (.readLine rdr)] 
+	     (if (nil? nextLine)
+			m
+			(if (not (or (clojure.string/blank? nextLine) (clojure.string/starts-with? nextLine "#comment#") ))
+			  (let [split-ln (clojure.string/split nextLine #",") 
+					split-val (clojure.string/split (nth split-ln 1) #"/")] ; expects rational number.
+				(recur (assoc m (nth split-ln 0) 
+				 (if (= 2 (count split-val)) ; if it is a rational number or not.
+					(/ (Integer/parseInt (nth split-val 0)) 
+					  (Integer/parseInt (nth split-val 1)) ) ; if so, divide the two numbers
+				    (Integer/parseInt (first split-val)) ; otherwise just include the number
+				  )
+			    )))
+			  (recur m)
+			)
+		 )))
+  ))
+
 
 (defn wiki-url-to-bow 
 	"Given a wikipedia title and language, convert the article to a Bag of Words with counts."
-	[v] ;[title lang-short]
+	[v] ;[title lang-short, parent, level ]
 	(let [title (nth v 0) 
 		  lang-short (nth v 1)	
 		  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/wiki/" title ])]
 	(println (clojure.string/join "" ["Getting wikipedia article at " url]))
 	(wcount (extract-wiki-text (fetch-url url)))))
 
+	
 (defn wiki-url-to-links-list
 	"Given a wikipedia title and language, get the first 10 titles of articles that are links to the given article.."
-	[v] ;[title lang-short]
+	[v] ;[title lang-short, parent, level]
 	(let [title (nth v 0) 
 	  lang-short (nth v 1)	
-	  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/w/api.php?action=query&prop=links&format=json&titles=" title ])]
+	  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/w/api.php?action=query&prop=links&format=json&titles=" title ])]   ; pllimit=max
 		(let [jres (cheshire/parse-string (get (client/get url {:cookie-policy :none}) :body))]
+		  (println url)
 		  (map 
-		  (fn [n] (vector n "en")) 
+		  (fn [n] (vector n lang-short title (inc (nth v 3)))) 
 		  (distinct 
 			(flatten 
 			  (map 
-				(fn [n] (clojure.string/lower-case (get n "title"))) 
+				(fn [n] (clojure.string/replace (get n "title") #" " "_" )) 
 				(get (nth (first (get (get jres "query") "pages")) 1) "links")))))
 		)
 	))
+	
 
+(defn expand-wiki-list 
+	"Given a list of wikipedia titles, return all titles of articles
+	that the given wikipedia titles have at least one link to."
+	[wlist]
+	;(println "Expanding " (count wlist) " links")
+	(distinct (reduce concat (map wiki-url-to-links-list wlist))))
+	
+	
 (defn -main
   "main function."
   [& args]
-  (do 
-	(def articles-to-fetch (list
-		[ "Fruit" "en" ]
-		[ "Vegetable" "en" ]
-		[ "Life" "en" ]
-		[ "Earth" "en" ]
-		;[ "WCNP" "en" ]
-		;[ "My_Shanty,_Lake_George" "en" ]
-	))
-	(def wikiBow (mapv wiki-url-to-bow articles-to-fetch) ) ; list of bag of words for topic model
+  (do
+   (def starting-articles-to-fetch 
+     (map
+		(fn [n] [(first n) (list n)])  ; 2 item vector of a list and the title
+		  (list
+		    [ "Fruit" "en", nil, 0 ]
+		    [ "Vegetable" "en", nil, 0 ]
+		    ;[ "Life" "en", nil, 0 ]
+		    ;[ "Earth" "en", nil, 0 ]
+		    ;[ "WCNP" "en", nil, 0 ]
+		    ;[ "My_Shanty,_Lake_George" "en", nil, 0 ]
+		  )))
+	(pprint/pprint starting-articles-to-fetch)
+
+	(def prop-links 
+		(map 
+		  (fn [inlistv]
+		    [ (first inlistv) (loop [i 0 elist (nth inlistv 1)]
+			  (if (>= i 0) 
+				elist
+				(recur (inc i) (reduce concat (list elist (expand-wiki-list elist))))
+			  )) 
+			] )
+		starting-articles-to-fetch)
+	)
+	; maybe have articles keep a list of its "parent articles"?
+	(pprint/pprint prop-links)
 	
-	;(def da-links (distinct (reduce concat (map  wiki-url-to-links-list  articles-to-fetch))))
-	
-	;(pprint/pprint  da-links)
 	
 	;(def da-links-2 (distinct (reduce concat (map  wiki-url-to-links-list  da-links))))
 
-	;(def documentsBows [ (wcount (clojure.string/split "this vector of fruit fruit fruit fruit apples looks like an orange football" #" ")) ] )
-	(def documentsBows [ (nth wikiBow 2) (nth wikiBow 3) ] )
+	;(def documentsBows [ (nth wikiBow 2) (nth wikiBow 3) ] )   ; (nth wikiBow 3)
 	
 	;(pprint/pprint vocabulary)
-	(def testBows [ 
-		(nth wikiBow 0) ; fruit
-		(nth wikiBow 1) ; vegetable
+	;(def testBows [ 
+		;(nth wikiBow 0) ; fruit
+		;(nth wikiBow 1) ; vegetable
 		;(wcount (clojure.string/split "fruit apples" #" "))
 		;(wcount (clojure.string/split "sports baseball soccer football" #" "))
-	])
-	(def testModels (mapv wcount-normalize testBows))
-	;(pprint/pprint testModels)
-	(def bgModel {"the" 0.25 "this" 0.25 "of" 0.25 "or" 0.25} ) ; 100% chance of generating "the"
-	(def bgModelProb 0.4)
-	(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
-	(print "vocabulary: ")
-	(pprint/pprint vocabulary)
-
-	(pprint/pprint (topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
+	;])
+	(def testBows (map (fn [linklsv] [(first linklsv) (map wiki-url-to-bow (nth linklsv 1))]) prop-links) )
+	(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBows))
+	;(def testModels (mapv wcount-normalize wikiBow))
+	;(def bgModel (read-language-model "google-common-words.lm")) ; 100% chance of generating "the"
+	;(def bgModelProb 0.7)
+	;(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
 	
+	(pprint/pprint (map 
+	  (fn [titleModelPair]
+	    (pprint/pprint titleModelPair)
+	    (pprint/pprint (str (nth titleModelPair 0)))
+	    (pprint/pprint titleModelPair)
+		(write-language-model (clojure.string/join #"" ["topic-model-" (str (nth titleModelPair 0)) ".lm"] )
+			(wcount-merge (nth titleModelPair 1)) 
+			(clojure.string/join #" " ["Topic model for" (str (nth titleModelPair 0))] ))
+	  )
+	  testModels))
+	;
 	
+	;(pprint/pprint (topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
+	
+	; code to make the background model.
+	;(def google-word-list (clojure.string/split (load-word-list "google-10000-english.txt") #"\n") )
+	;(def google-bg-model (wcount-normalize (wcount google-word-list)))
+	;(write-language-model "google-common-words.lm" google-bg-model "The 10000 most common english words")
+	
+	;(def read-model (read-language-model "test-model-out.lm" ))
+	;(println read-model)
 	;(def many-wcount-maps (map  wiki-url-to-bow  urls-to-fetch))
 	;(def blah (wcount-merge many-wcount-maps))
 	;(pprint/pprint blah)
-	
-	;(def html-root (nth text 1))
-	
-	; (def text (with-open [rdr (clojure.java.io/reader (first args))]
-	;	(clojure.string/join "\n" (line-seq rdr))))
-	
-	;(def anchors-in-body (html/select text [:body :a]) )
-	;(def divs-with-juicer-class (html/select text [:body :div.juicer ]) )
-	
-	;(def select-word-header-cambridge (html/select text [:div.cdo-section-title-hw]))
-	
-	; (def words (filterv (fn [x] (not (= x ""))) (mapv remove-punc (clojure.string/split (clojure.string/lower-case text) #" "))))
-		
-	; Now with a word-count-dict, evaluate what topic it fits.
-	; getting data from wikipedia https://github.com/dakrone/clj-http
-	; hopefully do this to mine topics? 
-	; might also be done for getting dict.cc data. 
-	; https://github.com/cgrand/enlive for html parsing.
 	
 ))
