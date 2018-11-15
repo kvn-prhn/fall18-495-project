@@ -10,11 +10,10 @@
 (defn fetch-url [url]
 	(html/html-resource (java.net.URL. url)))  ;TODO have a case for handling exceptions.
 
-; NOT DONE YET
-(defn load-word-list [f]
+(defn load-word-file-as-list [f]
 	"Load a file and return all of the words as a sequence."
 	(with-open [rdr (clojure.java.io/reader f)]
-		(clojure.string/join "\n" (distinct (line-seq rdr)))  
+		(clojure.string/join "\n" (line-seq rdr))  
 	))
 
 (defn remove-punc 
@@ -24,11 +23,13 @@
 		(clojure.string/replace
 			(clojure.string/replace 
 				(clojure.string/trim-newline x) 
-				#"[\"\.\\,=+%()\$!?<>;']" 
+				#"[\|„“\"\.\\,=+%()\$!?<>;'、，،]"   ; comma varients https://en.wikipedia.org/wiki/Comma
 				" ")
 			"\n" ; second replace
 			"")))
 
+(defn url-encode [s] (java.net.URLEncoder/encode s "UTF-8"))
+			
 (defn extract-wiki-text 
 	"given a wikipedia article in enlive form, get only the article text."
 	[text]
@@ -43,10 +44,10 @@
 		)
 	)
 	(filter (fn [n] 
-				(and
-				(not (clojure.string/blank? n))
-				(not (nil? (re-matches #"[0-9a-zA-Z]*" n)))
-				(not (nil? (re-matches #"[a-zA-Z]*" n)))
+				;(and
+				(not (clojure.string/blank? n)  ;)
+				;(not (nil? (re-matches #"[0-9a-zA-Z]*" n)))
+				;(not (nil? (re-matches #"[a-zA-Z]*" n)))
 			))
 		(map clojure.string/lower-case (map clojure.string/trim (clojure.string/split 
 			(remove-punc (clojure.string/join " " (flatten (iter-down 
@@ -383,24 +384,41 @@
 		 )))
   ))
 
-
-(defn wiki-url-to-bow 
-	"Given a wikipedia title and language, convert the article to a Bag of Words with counts."
+	
+(defn wiki-url-to-document 
+	"Given a wikipedia title and language, convert the article to a document containing the words"
 	[v] ;[title lang-short, parent, level ]
 	(let [title (nth v 0) 
 		  lang-short (nth v 1)	
-		  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/wiki/" title ])]
-	(println (clojure.string/join "" ["Getting wikipedia article at " url]))
-	(wcount (extract-wiki-text (fetch-url url)))))
+		  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/wiki/" (url-encode title) ])]
+		; (println (clojure.string/join "" ["Getting wikipedia article at " url]))
+		(extract-wiki-text (fetch-url url))))
 
+; Normal unexpanded version
+(defn wiki-url-to-bow 
+	"Given a wikipedia title and language, convert the article to a Bag of Words with counts."
+	[v] ;[title lang-short, parent, level ]
+	(wcount (wiki-url-to-document v)))
+
+; Experimental version - expanding the documents with bilingual dictionary.
+(defn wiki-url-to-bow-expand
+	"Given a wikipedia title and language, convert the article to a Bag of Words with counts."
+	[v source-dict target-dict] ;[title lang-short, parent, level ]
+	(let [srcdoc (wiki-url-to-document v)]
 	
+	(wcount srcdoc)
+	))
+	
+		
 (defn wiki-url-to-links-list
 	"Given a wikipedia title and language, get the first 10 titles of articles that are links to the given article.."
 	[v] ;[title lang-short, parent, level]
 	(let [title (nth v 0) 
 	  lang-short (nth v 1)	
-	  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/w/api.php?action=query&prop=links&format=json&titles=" title ])]   ; pllimit=max
-		(let [jres (cheshire/parse-string (get (client/get url {:cookie-policy :none}) :body))]
+	  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/w/api.php?action=query&prop=links&format=json&titles=" (url-encode title) ])]   ; pllimit=max
+		(let [jres (cheshire/parse-string 
+			(get (client/get url 
+			  {:cookie-policy :none :content-type "text/html; charset=utf-8"}) :body))]
 		  (println url)
 		  (map 
 		  (fn [n] (vector n lang-short title (inc (nth v 3)))) 
@@ -419,30 +437,82 @@
 	[wlist]
 	;(println "Expanding " (count wlist) " links")
 	(distinct (reduce concat (map wiki-url-to-links-list wlist))))
-	
-	
+
+(defn load-dictionary-files
+	"Given the list file names for dictionaries, load them all into a map 
+	that links words to a list of possible translations for that word."
+	[& fnames]
+	(println "Loading " fnames)
+	(let [raw-lines (flatten (loop [i 0 l (list)]
+	  (if (>= i (count fnames))
+		l
+		(recur (inc i) (conj l 
+			(with-open [rdr (clojure.java.io/reader (nth fnames i))]
+			  (doall (line-seq rdr))
+			))
+		))
+	  ))]
+	  (println "\n\nraw-lines:")
+      (println raw-lines)
+	  ; raw-lines into them map
+	  (loop [i 0 m {}]
+	    (if (>= i (count raw-lines))
+		  m
+		  (recur (inc i)
+		    (let [currln (str (nth raw-lines i))
+				  split-first (clojure.string/split currln #"\|")
+				  split-second (clojure.string/split (nth split-first 1) #"&")] 
+				(println "\n\ncurrln:")
+				(println currln)
+				(println "\n\nsplit-first:")
+				(println (first split-first))
+				(println "\n\nsplit-second:")
+				(println split-second) 
+				(assoc m (first split-first) split-second)) ; map the first word to list of possible translations
+			)
+		)
+	  )
+    )
+)
+
 (defn -main
   "main function."
   [& args]
   (do
+  
+  (def en-to-de-dict (load-dictionary-files "dict-data/Dictcc-Dataset-1-List-test.txt" "dict-data/Dictcc-Dataset-2-List-test.txt"))
+  ;(def en-to-de-dict (load-dictionary-files "dict-data/Dictcc-Dataset-1-List-En-First.txt" "dict-data/Dictcc-Dataset-2-List-En-First.txt"))
+  (pprint/pprint en-to-de-dict)
+  (pprint/pprint (count en-to-de-dict))
+	;(def de-to-en-dict (load-dictionary-files "dict-data/Dictcc-Dataset-1-List.txt" "dict-data/Dictcc-Dataset-2-List.txt")) 
+	
+  
+  (comment
+    ; format of the articles: [ ["title" "lang-short"], parent, depth ]
    (def starting-articles-to-fetch 
      (map
-		(fn [n] [(first n) (list n)])  ; 2 item vector of a list and the title
+		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
 		  (list
 		    [ "Fruit" "en", nil, 0 ]
-		    [ "Vegetable" "en", nil, 0 ]
-		    ;[ "Life" "en", nil, 0 ]
-		    ;[ "Earth" "en", nil, 0 ]
-		    ;[ "WCNP" "en", nil, 0 ]
-		    ;[ "My_Shanty,_Lake_George" "en", nil, 0 ]
+		    [ "Frucht" "de", nil, 0 ]
+		    ;[ "ثمرة" "ar", nil, 0 ] ; - this is not working yet :(
 		  )))
 	(pprint/pprint starting-articles-to-fetch)
 
+	;(println "ثمرة")
+	;(println (.getBytes "ثمرة"))
+	; https://docs.oracle.com/javase/7/docs/api/java/net/URLEncoder.html#encode(java.lang.String,%20java.lang.String)
+	;(println (java.net.URLEncoder/encode "ثمرة" "UTF-8") )
+	;(println (new java.lang.String (.getBytes "ثمرة") "US-ASCII")) ; encode it to ascii characters. 
+	;(println "%E6%9E%9C%E5%AE%9E")
+	;(comment
+	;(println ( stringify-bytes "果实"))
+	
 	(def prop-links 
 		(map 
 		  (fn [inlistv]
 		    [ (first inlistv) (loop [i 0 elist (nth inlistv 1)]
-			  (if (>= i 0) 
+			  (if (>= i 1) 
 				elist
 				(recur (inc i) (reduce concat (list elist (expand-wiki-list elist))))
 			  )) 
@@ -451,42 +521,48 @@
 	)
 	; maybe have articles keep a list of its "parent articles"?
 	(pprint/pprint prop-links)
+	; dictionaries used for expanding documents. 
 	
+	; new article format: [ ["title" "lang-short"] {word-count-map}]
+	;(def testBows (map (fn [linklsv] [(first linklsv) (map wiki-url-to-bow (nth linklsv 1))]) prop-links) )	
+	(def testBowsExpand (map 
+	  (fn [linklsv] 
+		[(first linklsv) ; vector with title and language
+		  (map  ; second part is the expanded bow
+			(fn [n] ; n is the link
+				; TODO: change the ordering based on the language. 
+				(wiki-url-to-bow-expand  n  en-to-de-dict  de-to-en-dict)
+			)
+			(nth linklsv 1))
+		] 
+	  ) prop-links)
+	)	
 	
-	;(def da-links-2 (distinct (reduce concat (map  wiki-url-to-links-list  da-links))))
-
-	;(def documentsBows [ (nth wikiBow 2) (nth wikiBow 3) ] )   ; (nth wikiBow 3)
-	
-	;(pprint/pprint vocabulary)
-	;(def testBows [ 
-		;(nth wikiBow 0) ; fruit
-		;(nth wikiBow 1) ; vegetable
-		;(wcount (clojure.string/split "fruit apples" #" "))
-		;(wcount (clojure.string/split "sports baseball soccer football" #" "))
-	;])
-	(def testBows (map (fn [linklsv] [(first linklsv) (map wiki-url-to-bow (nth linklsv 1))]) prop-links) )
-	(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBows))
+	;(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBows))
+	(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBowsExpand))
 	;(def testModels (mapv wcount-normalize wikiBow))
 	;(def bgModel (read-language-model "google-common-words.lm")) ; 100% chance of generating "the"
 	;(def bgModelProb 0.7)
 	;(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
 	
-	(pprint/pprint (map 
+	(defn write-topic-models [] (map 
 	  (fn [titleModelPair]
-	    (pprint/pprint titleModelPair)
+	    ;(pprint/pprint titleModelPair)
 	    (pprint/pprint (str (nth titleModelPair 0)))
-	    (pprint/pprint titleModelPair)
-		(write-language-model (clojure.string/join #"" ["topic-model-" (str (nth titleModelPair 0)) ".lm"] )
+	    ;(pprint/pprint titleModelPair)
+		(write-language-model (clojure.string/join #"" ["topic-model-" 
+			(str (clojure.string/join #"-" (reverse (nth titleModelPair 0)))) ".lm"] )
 			(wcount-merge (nth titleModelPair 1)) 
 			(clojure.string/join #" " ["Topic model for" (str (nth titleModelPair 0))] ))
 	  )
 	  testModels))
-	;
+	(println (write-topic-models));
 	
+	);comment
 	;(pprint/pprint (topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
 	
 	; code to make the background model.
-	;(def google-word-list (clojure.string/split (load-word-list "google-10000-english.txt") #"\n") )
+	;(def google-word-list (clojure.string/split (load-word-file-as-list "google-10000-english.txt") #"\n") )
 	;(def google-bg-model (wcount-normalize (wcount google-word-list)))
 	;(write-language-model "google-common-words.lm" google-bg-model "The 10000 most common english words")
 	
@@ -495,5 +571,5 @@
 	;(def many-wcount-maps (map  wiki-url-to-bow  urls-to-fetch))
 	;(def blah (wcount-merge many-wcount-maps))
 	;(pprint/pprint blah)
-	
+	;) ; end comment
 ))
