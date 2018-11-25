@@ -67,10 +67,13 @@
 	  (loop [i 0 mcount mcount_input]
 		(if (>= i (count wlist))
 		  mcount
-		  (recur (inc i) (if (nil? (get mcount (nth wlist i)))
-			(assoc mcount (nth wlist i) 1)
-			(update mcount (nth wlist i) inc)
-		  ))
+		  (if (symbol? (get mcount (nth wlist i)))
+		    (recur (inc i) mcount) ; don't add symbols
+		    (recur (inc i) (if (nil? (get mcount (nth wlist i)))
+			  (assoc mcount (nth wlist i) 1)
+			  (update mcount (nth wlist i) inc)
+		    ))
+		  )
 		)
 	))
 )
@@ -409,29 +412,37 @@
 	source-dict is the article language to the target language. target-dict is the target 
 	language to the article language. Both dictionaries are functions that return a list
 	given a single word. Must also pass in connection to database with dictionaries."
-	[v source-dict target-dict md-db] ;[title lang-short, parent, level ]
+	[v source-dict target-dict] ;[title lang-short, parent, level ]
 	(let [srcdoc (wiki-url-to-document v)]
 	  ; take source document and expand each word, adding the result to a resulting document.
-	  ;(println srcdoc)
-	  (let [ resultdoc (flatten (map 
-	    (fn [word]
-		  (println "Expand " word)
-		  (let [twords (source-dict md-db word)]
-		    ;(print word ": translated into... ")
-			;(println twords)
+	  (let [ resultdoc (for [word srcdoc] 
+		  (future (let [
+				md-conn (mg/connect) ; each thread has its own connection.
+				md-dictionaries (mg/get-db md-conn "dictionaries")
+				twords (source-dict md-dictionaries word)]
 			(if (nil? twords)
-			  (list word) ; don't change the word if it has no translations
-			  (flatten (map ; expand the translation list with source translations
-  			    (fn [tw]
-				  (target-dict md-db tw))
-			    twords 
-			  )) 
+			  (doall 
+				(mg/disconnect md-conn)
+				(list word) ; don't change the word if it has no translations
+			  ) ; end true result
+			  (doall
+			    (let [res-words (do (flatten (map ; expand the translation list with source translations
+  			      (fn [tw]
+				    (target-dict md-dictionaries tw))
+			      twords) 
+			    ))]
+				  (mg/disconnect md-conn) 
+				  (conj res-words word)
+			    )
+			  ) ; end false result.
 			)
-		  )
+		  )   ); end future
+		) 	]
+		(let [ resultdocNotified (flatten (map (fn [n] @n) resultdoc)) ]
+		  ; (println resultdoc)
+		  (wcount resultdocNotified)
 		)
-		srcdoc)) ]
-		; (println resultdoc)
-		(wcount resultdoc))
+	  )
 	))
 	
 		
@@ -468,7 +479,9 @@
 ; The schema is as follows: objects have two fields including
 ; the _id, word (string) and translations (array of strings). 
 ; There will be an index over the field "word"
-	
+
+(def expand-amount 3)
+
 (defn en-to-de-dict 
 	"Given a word in english, return a list of
 	possible german translations of that word."
@@ -478,10 +491,10 @@
 	(let [ret (mc/find-maps md-db "en_de_dict" { :word word })
 		 ret_with_to (mc/find-maps md-db "en_de_dict" { :word (clojure.string/join #" " ["to" word]) })]
 		; convert the map into a list of all possible translations
-		(distinct (concat 
+		(take expand-amount (distinct (concat 
 		  (flatten (map (fn [w] (get w :translations)) ret))
 		  (flatten (map (fn [w] (get w :translations)) ret_with_to))
-		))
+		)))
 	)
 )
 
@@ -492,7 +505,7 @@
 	;(println "translating " word)
 	(let [ret (mc/find-maps md-db "de_en_dict" {:word word})]
 		; list of maps to lists of lists that are flattened... 
-	    (take 4 (distinct   ; need to reduce how much there is to make it more computationally feasible!
+	    (take expand-amount (distinct   ; need to reduce how much there is to make it more computationally feasible!
 	      (flatten (map (fn [w] (get w :translations)) ret))
 		)) ; limit the amount taken
 	)
@@ -539,6 +552,7 @@
      (map
 		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
 		  (list
+		    ;[ "Kastellegården" "en", nil, 0 ]
 		    [ "Fruit" "en", nil, 0 ]
 		   ; [ "Frucht" "de", nil, 0 ]
 		    ;[ "ثمرة" "ar", nil, 0 ] ; - this is not working yet :(
@@ -574,8 +588,8 @@
 	;(def testBows (map (fn [linklsv] [(first linklsv) (map wiki-url-to-bow (nth linklsv 1))]) prop-links) )	
 	(def expand true)
 	
-	(def md-conn (mg/connect))
-    (def md-dictionaries (mg/get-db md-conn "dictionaries"))
+	;(def md-conn (mg/connect))
+    ;(def md-dictionaries (mg/get-db md-conn "dictionaries"))
 	(println "Building BOWs. Expand = " expand)
 	; making the Bows with expansion using a dictionary.
 	(def testBowsExpand (map 
@@ -584,9 +598,9 @@
 		  (map  ; second part is the expanded bow
 			(fn [n] ; n is the link
 				(if (= (nth n 1) "en")
-					(wiki-url-to-bow-expand n en-to-de-dict de-to-en-dict md-dictionaries)
+					(wiki-url-to-bow-expand n en-to-de-dict de-to-en-dict)
 					(if (= (nth n 1) "de")
-					  (wiki-url-to-bow-expand n de-to-en-dict en-to-de-dict md-dictionaries)
+					  (wiki-url-to-bow-expand n de-to-en-dict en-to-de-dict)
 					   nil ; can't handle that language 
 					)
 				)
@@ -635,5 +649,5 @@
 	;(pprint/pprint blah)
 	;) ; end comment
 	
-	(do (mg/disconnect md-conn))
+	;(do (mg/disconnect md-conn))
 ))
