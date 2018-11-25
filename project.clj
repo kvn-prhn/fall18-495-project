@@ -9,6 +9,7 @@
 	[http-kit "2.3.0"]
 	[clj-http "3.9.1"]
 	[cheshire "5.8.1"]
+	[com.novemberain/monger "3.1.0"]
   ]
   :main ^:skip-aot process-text.core
   :target-path "target/%s"

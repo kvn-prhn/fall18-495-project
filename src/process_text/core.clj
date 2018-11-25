@@ -5,6 +5,9 @@
   (:require [clojure.pprint :as pprint])
   (:require [clj-http.client :as client])
   (:require [cheshire.core :as cheshire])
+  (:require [monger.core :as mg])
+  (:require [monger.collection :as mc])
+  (:import [com.mongodb MongoOptions ServerAddress])
   )
 
 (defn fetch-url [url]
@@ -402,11 +405,33 @@
 
 ; Experimental version - expanding the documents with bilingual dictionary.
 (defn wiki-url-to-bow-expand
-	"Given a wikipedia title and language, convert the article to a Bag of Words with counts."
-	[v source-dict target-dict] ;[title lang-short, parent, level ]
+	"Given a wikipedia title and language, convert the article to a Bag of Words with counts.
+	source-dict is the article language to the target language. target-dict is the target 
+	language to the article language. Both dictionaries are functions that return a list
+	given a single word. Must also pass in connection to database with dictionaries."
+	[v source-dict target-dict md-db] ;[title lang-short, parent, level ]
 	(let [srcdoc (wiki-url-to-document v)]
-	
-	(wcount srcdoc)
+	  ; take source document and expand each word, adding the result to a resulting document.
+	  ;(println srcdoc)
+	  (let [ resultdoc (flatten (map 
+	    (fn [word]
+		  (println "Expand " word)
+		  (let [twords (source-dict md-db word)]
+		    ;(print word ": translated into... ")
+			;(println twords)
+			(if (nil? twords)
+			  (list word) ; don't change the word if it has no translations
+			  (flatten (map ; expand the translation list with source translations
+  			    (fn [tw]
+				  (target-dict md-db tw))
+			    twords 
+			  )) 
+			)
+		  )
+		)
+		srcdoc)) ]
+		; (println resultdoc)
+		(wcount resultdoc))
 	))
 	
 		
@@ -438,6 +463,42 @@
 	;(println "Expanding " (count wlist) " links")
 	(distinct (reduce concat (map wiki-url-to-links-list wlist))))
 
+
+; These two functions use the local mongoDB database.
+; The schema is as follows: objects have two fields including
+; the _id, word (string) and translations (array of strings). 
+; There will be an index over the field "word"
+	
+(defn en-to-de-dict 
+	"Given a word in english, return a list of
+	possible german translations of that word."
+	[md-db word]
+	;(println "translating " word)
+	; try to find the word by itself and with "to " in front of it for possible verbs 
+	(let [ret (mc/find-maps md-db "en_de_dict" { :word word })
+		 ret_with_to (mc/find-maps md-db "en_de_dict" { :word (clojure.string/join #" " ["to" word]) })]
+		; convert the map into a list of all possible translations
+		(distinct (concat 
+		  (flatten (map (fn [w] (get w :translations)) ret))
+		  (flatten (map (fn [w] (get w :translations)) ret_with_to))
+		))
+	)
+)
+
+(defn de-to-en-dict
+	"Given a word in german, return a list of
+	possible english translations of that word."
+	[md-db word] 
+	;(println "translating " word)
+	(let [ret (mc/find-maps md-db "de_en_dict" {:word word})]
+		; list of maps to lists of lists that are flattened... 
+	    (take 4 (distinct   ; need to reduce how much there is to make it more computationally feasible!
+	      (flatten (map (fn [w] (get w :translations)) ret))
+		)) ; limit the amount taken
+	)
+)
+	
+	
 (defn load-dictionary-files
 	"Given the list file names for dictionaries, load them all into a map 
 	that links words to a list of possible translations for that word."
@@ -452,8 +513,8 @@
 			))
 		))
 	  ))]
-	  (println "\n\nraw-lines:")
-      (println raw-lines)
+	  ;(println "\n\nraw-lines:")
+      ;(println raw-lines)
 	  ; raw-lines into them map
 	  (loop [i 0 m {}]
 	    (if (>= i (count raw-lines))
@@ -462,12 +523,6 @@
 		    (let [currln (str (nth raw-lines i))
 				  split-first (clojure.string/split currln #"\|")
 				  split-second (clojure.string/split (nth split-first 1) #"&")] 
-				(println "\n\ncurrln:")
-				(println currln)
-				(println "\n\nsplit-first:")
-				(println (first split-first))
-				(println "\n\nsplit-second:")
-				(println split-second) 
 				(assoc m (first split-first) split-second)) ; map the first word to list of possible translations
 			)
 		)
@@ -479,22 +534,13 @@
   "main function."
   [& args]
   (do
-  
-  (def en-to-de-dict (load-dictionary-files "dict-data/Dictcc-Dataset-1-List-test.txt" "dict-data/Dictcc-Dataset-2-List-test.txt"))
-  ;(def en-to-de-dict (load-dictionary-files "dict-data/Dictcc-Dataset-1-List-En-First.txt" "dict-data/Dictcc-Dataset-2-List-En-First.txt"))
-  (pprint/pprint en-to-de-dict)
-  (pprint/pprint (count en-to-de-dict))
-	;(def de-to-en-dict (load-dictionary-files "dict-data/Dictcc-Dataset-1-List.txt" "dict-data/Dictcc-Dataset-2-List.txt")) 
-	
-  
-  (comment
-    ; format of the articles: [ ["title" "lang-short"], parent, depth ]
+	; format of the articles: [ ["title" "lang-short"], parent, depth ]
    (def starting-articles-to-fetch 
      (map
 		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
 		  (list
 		    [ "Fruit" "en", nil, 0 ]
-		    [ "Frucht" "de", nil, 0 ]
+		   ; [ "Frucht" "de", nil, 0 ]
 		    ;[ "ثمرة" "ar", nil, 0 ] ; - this is not working yet :(
 		  )))
 	(pprint/pprint starting-articles-to-fetch)
@@ -512,7 +558,7 @@
 		(map 
 		  (fn [inlistv]
 		    [ (first inlistv) (loop [i 0 elist (nth inlistv 1)]
-			  (if (>= i 1) 
+			  (if (>= i 0) ; how much to expand it?
 				elist
 				(recur (inc i) (reduce concat (list elist (expand-wiki-list elist))))
 			  )) 
@@ -524,20 +570,35 @@
 	; dictionaries used for expanding documents. 
 	
 	; new article format: [ ["title" "lang-short"] {word-count-map}]
+	; making the Bows without expansion
 	;(def testBows (map (fn [linklsv] [(first linklsv) (map wiki-url-to-bow (nth linklsv 1))]) prop-links) )	
+	(def expand true)
+	
+	(def md-conn (mg/connect))
+    (def md-dictionaries (mg/get-db md-conn "dictionaries"))
+	(println "Building BOWs. Expand = " expand)
+	; making the Bows with expansion using a dictionary.
 	(def testBowsExpand (map 
 	  (fn [linklsv] 
 		[(first linklsv) ; vector with title and language
 		  (map  ; second part is the expanded bow
 			(fn [n] ; n is the link
-				; TODO: change the ordering based on the language. 
-				(wiki-url-to-bow-expand  n  en-to-de-dict  de-to-en-dict)
+				(if (= (nth n 1) "en")
+					(wiki-url-to-bow-expand n en-to-de-dict de-to-en-dict md-dictionaries)
+					(if (= (nth n 1) "de")
+					  (wiki-url-to-bow-expand n de-to-en-dict en-to-de-dict md-dictionaries)
+					   nil ; can't handle that language 
+					)
+				)
 			)
 			(nth linklsv 1))
 		] 
 	  ) prop-links)
 	)	
+	(def file-name-pre "topic-model")
+	(def file-name-pre "topic-model-expand")
 	
+	(println "Building the language model")
 	;(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBows))
 	(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBowsExpand))
 	;(def testModels (mapv wcount-normalize wikiBow))
@@ -550,15 +611,15 @@
 	    ;(pprint/pprint titleModelPair)
 	    (pprint/pprint (str (nth titleModelPair 0)))
 	    ;(pprint/pprint titleModelPair)
-		(write-language-model (clojure.string/join #"" ["topic-model-" 
+		(write-language-model (clojure.string/join #"" [file-name-pre 
 			(str (clojure.string/join #"-" (reverse (nth titleModelPair 0)))) ".lm"] )
 			(wcount-merge (nth titleModelPair 1)) 
 			(clojure.string/join #" " ["Topic model for" (str (nth titleModelPair 0))] ))
 	  )
 	  testModels))
-	(println (write-topic-models));
+	  
+	(println (write-topic-models)) ; this actually runs all the things
 	
-	);comment
 	;(pprint/pprint (topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
 	
 	; code to make the background model.
@@ -566,10 +627,13 @@
 	;(def google-bg-model (wcount-normalize (wcount google-word-list)))
 	;(write-language-model "google-common-words.lm" google-bg-model "The 10000 most common english words")
 	
+	;(def bg-model (read-language-model "google-common-words.lm" ))
 	;(def read-model (read-language-model "test-model-out.lm" ))
 	;(println read-model)
 	;(def many-wcount-maps (map  wiki-url-to-bow  urls-to-fetch))
 	;(def blah (wcount-merge many-wcount-maps))
 	;(pprint/pprint blah)
 	;) ; end comment
+	
+	(do (mg/disconnect md-conn))
 ))
