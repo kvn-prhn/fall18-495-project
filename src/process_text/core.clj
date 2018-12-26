@@ -412,33 +412,43 @@
 	source-dict is the article language to the target language. target-dict is the target 
 	language to the article language. Both dictionaries are functions that return a list
 	given a single word. Must also pass in connection to database with dictionaries."
-	[v source-dict target-dict] ;[title lang-short, parent, level ]
+	[v source-dict target-dict ignore-pred] ;[title lang-short, parent, level ]
 	(let [srcdoc (wiki-url-to-document v)]
 	  ; take source document and expand each word, adding the result to a resulting document.
 	  (let [ resultdoc (for [word srcdoc] 
-		  (future (let [
-				md-conn (mg/connect) ; each thread has its own connection.
-				md-dictionaries (mg/get-db md-conn "dictionaries")
-				twords (source-dict md-dictionaries word)]
-			(if (nil? twords)
-			  (doall 
-				(mg/disconnect md-conn)
-				(list word) ; don't change the word if it has no translations
-			  ) ; end true result
-			  (doall
-			    (let [res-words (do (flatten (map ; expand the translation list with source translations
-  			      (fn [tw]
-				    (target-dict md-dictionaries tw))
-			      twords) 
-			    ))]
-				  (mg/disconnect md-conn) 
-				  (conj res-words word)
-			    )
-			  ) ; end false result.
-			)
-		  )   ); end future
+		  (if (not (ignore-pred word)) ; ignore words from the ignore-pred
+			(future (let [
+					md-conn (mg/connect) ; each thread has its own connection.
+					md-dictionaries (mg/get-db md-conn "dictionaries")
+					twords (source-dict md-dictionaries word)]
+				(if (nil? twords)
+				  (doall 
+					(mg/disconnect md-conn)
+					(list word) ; don't change the word if it has no translations
+				  ) ; end true result
+				  (doall
+					(let [res-words (do (flatten (map ; expand the translation list with source translations
+					  (fn [tw]
+						(target-dict md-dictionaries tw))
+					  twords) 
+					))]
+					  (mg/disconnect md-conn) 
+					  (conj res-words word) ; add the original word to the result.
+					)
+				  ) ; end false result.
+				)
+			  )); end future
+			(list word) ; just return the word if it is an ignored one.
+		  )
 		) 	]
-		(let [ resultdocNotified (flatten (map (fn [n] @n) resultdoc)) ]
+		(let [ resultdocNotified 
+			(flatten 
+			  (map 
+				(fn [n]
+				  (if (future? n)
+				    @n   ; wait for the future if it is a future.
+					n)) 
+			   resultdoc)) ]
 		  ; (println resultdoc)
 		  (wcount resultdocNotified)
 		)
@@ -543,6 +553,37 @@
     )
 )
 
+(defn is-word-prep-or-article-en 
+	"Return true or false whether the given english 
+	word is an article or preposition."
+	[w]
+	(println "testing " w " english")
+	(let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-en.csv") #"\n") 
+	      articles (list "a" "an" "the")]
+		   (or 
+			  (some (partial = w) prepositions)
+			  (some (partial = w) articles)
+			)
+		)
+	)
+
+	
+(defn is-word-prep-or-article-de 
+	"Return true or false whether the given german 
+	word is an article or preposition."
+	[w]
+	(println "probieren " w " deutsch")
+	(let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-de.csv") #"\n") 
+	      articles (list "ein" "eine" "einem" "einer" "eines" "der" "die" "das" "dem" "den" "des")]
+		   (pprint/pprint prepositions)
+		   (pprint/pprint articles)
+		   (or 
+			  (some (partial = w) prepositions)  ; https://www.programming-idioms.org/idiom/12/check-if-list-contains-a-value/807/clojure
+			  (some (partial = w) articles)
+			)
+		)
+	)
+	
 (defn -main
   "main function."
   [& args]
@@ -551,9 +592,22 @@
    (def starting-articles-to-fetch 
      (map
 		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
-		  (list
-		    ;[ "Kastellegården" "en", nil, 0 ]
-		    [ "Fruit" "en", nil, 0 ]
+		  (list 
+		    ; English topic model articles
+			;[ "Sport" "en", nil, 0 ]
+		    ;[ "Politics" "en", nil, 0 ]
+		    ;[ "Science" "en", nil, 0 ]
+		    ;[ "Business" "en", nil, 0 ]
+		    
+			; German topic model articles
+			;[ "Sport" "de", nil, 0 ]
+		    ;[ "Politik" "de", nil, 0 ]
+		    ;[ "Wissenschaft" "de", nil, 0 ]
+		    [ "Geschäft_(Wirtschaft)" "de", nil, 0 ] ; NOT a wikipedia inter-language link
+			
+			; old testing articles
+			;[ "Fruit" "en", nil, 0 ]
+		    ;[ "Stachytarpheta_svensonii" "en", nil, 0 ]
 		   ; [ "Frucht" "de", nil, 0 ]
 		    ;[ "ثمرة" "ar", nil, 0 ] ; - this is not working yet :(
 		  )))
@@ -567,12 +621,13 @@
 	;(println "%E6%9E%9C%E5%AE%9E")
 	;(comment
 	;(println ( stringify-bytes "果实"))
+	(def link-expand-amount 1) ; how many adjacent articles to add for each topic model.
 	
 	(def prop-links 
 		(map 
 		  (fn [inlistv]
 		    [ (first inlistv) (loop [i 0 elist (nth inlistv 1)]
-			  (if (>= i 0) ; how much to expand it?
+			  (if (>= i link-expand-amount) ; how much to expand it?
 				elist
 				(recur (inc i) (reduce concat (list elist (expand-wiki-list elist))))
 			  )) 
@@ -581,44 +636,54 @@
 	)
 	; maybe have articles keep a list of its "parent articles"?
 	(pprint/pprint prop-links)
-	; dictionaries used for expanding documents. 
-	
 	; new article format: [ ["title" "lang-short"] {word-count-map}]
-	; making the Bows without expansion
-	;(def testBows (map (fn [linklsv] [(first linklsv) (map wiki-url-to-bow (nth linklsv 1))]) prop-links) )	
-	(def expand true)
+
+
+	; whether or not to expand or not expand when making the topic models (experimental)
+	(def expand false) 
 	
-	;(def md-conn (mg/connect))
-    ;(def md-dictionaries (mg/get-db md-conn "dictionaries"))
 	(println "Building BOWs. Expand = " expand)
 	; making the Bows with expansion using a dictionary.
-	(def testBowsExpand (map 
-	  (fn [linklsv] 
-		[(first linklsv) ; vector with title and language
-		  (map  ; second part is the expanded bow
-			(fn [n] ; n is the link
-				(if (= (nth n 1) "en")
-					(wiki-url-to-bow-expand n en-to-de-dict de-to-en-dict)
-					(if (= (nth n 1) "de")
-					  (wiki-url-to-bow-expand n de-to-en-dict en-to-de-dict)
-					   nil ; can't handle that language 
+	(def articleTopicsBow
+	  (if expand 
+	    (map ; expand
+		  (fn [linklsv] 
+			[(first linklsv) ; vector with title and language
+			  (map  ; second part is the expanded bow
+				(fn [n] ; n is the link
+					(if (= (nth n 1) "en")
+						(wiki-url-to-bow-expand n en-to-de-dict de-to-en-dict is-word-prep-or-article-en)
+						(if (= (nth n 1) "de")
+						  (wiki-url-to-bow-expand n de-to-en-dict en-to-de-dict is-word-prep-or-article-de)
+						   (wiki-url-to-bow n) ; can't expand that language, so do normally
+						)
 					)
 				)
-			)
-			(nth linklsv 1))
-		] 
-	  ) prop-links)
+				(nth linklsv 1))
+			] 
+		  ) prop-links) ; end if expanded
+		  
+		(map    ; else do not expand
+		  (fn [linklsv] 
+			[(first linklsv) ; vector with title and language
+			  (map  ; second part is the expanded bow
+				(fn [n] ; n is the link
+					(wiki-url-to-bow n)
+				)
+				(nth linklsv 1))
+			] 
+		  ) prop-links)
+	  ) ; end if
 	)	
-	(def file-name-pre "topic-model")
-	(def file-name-pre "topic-model-expand")
+	(def file-name-pre 
+	  (if expand
+		"topic-model-expand-"
+		"topic-model-"
+	  )
+	)
 	
 	(println "Building the language model")
-	;(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBows))
-	(def testModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) testBowsExpand))
-	;(def testModels (mapv wcount-normalize wikiBow))
-	;(def bgModel (read-language-model "google-common-words.lm")) ; 100% chance of generating "the"
-	;(def bgModelProb 0.7)
-	;(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
+	(def topicModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) articleTopicsBow))
 	
 	(defn write-topic-models [] (map 
 	  (fn [titleModelPair]
@@ -630,24 +695,25 @@
 			(wcount-merge (nth titleModelPair 1)) 
 			(clojure.string/join #" " ["Topic model for" (str (nth titleModelPair 0))] ))
 	  )
-	  testModels))
+	  topicModels))
 	  
 	(println (write-topic-models)) ; this actually runs all the things
 	
+	
+	; TODO: This has to do with calculating results using existing language models. 
+	;(def bgModel (read-language-model "google-common-words.lm")) ; load background model
+	;(def bgModelProb 0.7)
+	;(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
+	
 	;(pprint/pprint (topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
+	
+	
 	
 	; code to make the background model.
 	;(def google-word-list (clojure.string/split (load-word-file-as-list "google-10000-english.txt") #"\n") )
 	;(def google-bg-model (wcount-normalize (wcount google-word-list)))
 	;(write-language-model "google-common-words.lm" google-bg-model "The 10000 most common english words")
 	
-	;(def bg-model (read-language-model "google-common-words.lm" ))
-	;(def read-model (read-language-model "test-model-out.lm" ))
-	;(println read-model)
-	;(def many-wcount-maps (map  wiki-url-to-bow  urls-to-fetch))
-	;(def blah (wcount-merge many-wcount-maps))
-	;(pprint/pprint blah)
-	;) ; end comment
 	
 	;(do (mg/disconnect md-conn))
 ))
