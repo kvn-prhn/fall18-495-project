@@ -11,7 +11,15 @@
   )
 
 (defn fetch-url [url]
-	(html/html-resource (java.net.URL. url)))  ;TODO have a case for handling exceptions.
+	(try 
+		(html/html-resource (java.net.URL. url))
+	  (catch Exception e 
+		(do 
+		  (println "caught exception: " (.getMessage e))
+		  nil ; nil on error
+		))
+	)
+)
 
 (defn load-word-file-as-list [f]
 	"Load a file and return all of the words as a sequence."
@@ -34,9 +42,12 @@
 (defn url-encode [s] (java.net.URLEncoder/encode s "UTF-8"))
 			
 (defn extract-wiki-text 
-	"given a wikipedia article in enlive form, get only the article text."
+	"given a wikipedia article in enlive form, get only the article text.
+	If there is an error getting the text, then return an empty string. "
 	[text]
-	(defn iter-down
+	(if (nil? text)
+	  "" ; empty string on nil value
+	  (do (defn iter-down
 		[t] 
 		(if (seq? t)
 			(concat (map iter-down t))
@@ -45,8 +56,8 @@
 				(iter-down (get t :content))
 			)
 		)
-	)
-	(filter (fn [n] 
+	  )
+	  (filter (fn [n] 
 				;(and
 				(not (clojure.string/blank? n)  ;)
 				;(not (nil? (re-matches #"[0-9a-zA-Z]*" n)))
@@ -57,7 +68,9 @@
 				(flatten (html/select text [:div.mw-body-content :div.mw-parser-output :p])) 
 			)))) ; this is the article
 			#" "
-	)))))
+	  )))))
+	)
+)
 	
 	
 (defn wcount 
@@ -459,20 +472,57 @@
 (defn wiki-url-to-links-list
 	"Given a wikipedia title and language, get the first 10 titles of articles that are links to the given article.."
 	[v] ;[title lang-short, parent, level]
-	(let [title (nth v 0) 
-	  lang-short (nth v 1)	
-	  url (clojure.string/join "" [ "https://" lang-short ".wikipedia.org/w/api.php?action=query&prop=links&format=json&titles=" (url-encode title) ])]   ; pllimit=max
-		(let [jres (cheshire/parse-string 
-			(get (client/get url 
-			  {:cookie-policy :none :content-type "text/html; charset=utf-8"}) :body))]
-		  (println url)
-		  (map 
-		  (fn [n] (vector n lang-short title (inc (nth v 3)))) 
-		  (distinct 
-			(flatten 
-			  (map 
-				(fn [n] (clojure.string/replace (get n "title") #" " "_" )) 
-				(get (nth (first (get (get jres "query") "pages")) 1) "links")))))
+	(let [
+	    title (nth v 0) 
+	    lang-short (nth v 1)
+		url-base (clojure.string/join "" [ "https://" lang-short   ".wikipedia.org/w/api.php?action=query&prop=links&format=json&titles=" (url-encode title) ])
+	  ] 
+		(loop [
+			  all-links ()
+			  url url-base
+			]
+			(let [jres (cheshire/parse-string 
+						(get (client/get url 
+							{:cookie-policy :none :content-type "text/html; charset=utf-8"}) 
+						:body)
+					  )
+			  ]
+			  (println url)
+			  (let [
+					adding-links (map ; adding-links are the links that were grabbed this last step. 
+						(fn [articleName] ; turn each article name into the standard format.
+						  [ articleName lang-short title (inc (nth v 3)) ]
+						) 
+						(remove 
+						  (fn [n] ; remove titles that have a : in them.
+							(clojure.string/includes? n ":")
+						  )
+							(distinct 
+							  (flatten 
+								(map 
+								  (fn [n] 
+									(clojure.string/replace (get n "title") #" " "_" )
+								  )
+								  (get 
+									(nth (first (get (get jres "query") "pages")) 1) 
+									"links")
+								)
+							)))
+					    )
+					continue-str (if (nil? (get jres "continue"))
+									nil ; don't continue if no continue
+								    (get (get jres "continue") "plcontinue") ; otherwise, get continue text
+								)
+				  ]
+				(if (nil? continue-str)
+				   (concat all-links adding-links) ; just return the list of links when not continuing
+				   (recur 
+					  (concat all-links adding-links) ; update next step list of links
+					  (clojure.string/join "" [url-base "&plcontinue=" continue-str] ) ; add continue query to the url-base 
+				   )
+				)
+			  )
+			)
 		)
 	))
 	
@@ -594,22 +644,23 @@
 		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
 		  (list 
 		    ; English topic model articles
-			;[ "Sport" "en", nil, 0 ]
-		    ;[ "Politics" "en", nil, 0 ]
-		    ;[ "Science" "en", nil, 0 ]
-		    ;[ "Business" "en", nil, 0 ]
+			[ "Sport" "en" nil 0 ]
+		    ;[ "Politics" "en" nil 0 ]
+		    ;[ "Science" "en" nil 0 ]
+		    ;[ "Business" "en" nil 0 ]
 		    
 			; German topic model articles
-			;[ "Sport" "de", nil, 0 ]
-		    ;[ "Politik" "de", nil, 0 ]
-		    ;[ "Wissenschaft" "de", nil, 0 ]
-		    [ "Geschäft_(Wirtschaft)" "de", nil, 0 ] ; NOT a wikipedia inter-language link
+			;[ "Sport" "de" nil 0 ]
+		    ;[ "Politik" "de" nil 0 ]
+		    ;[ "Wissenschaft" "de" nil 0 ]
+		    ;[ "Geschäft_(Wirtschaft)" "de" nil 0 ] ; NOT a wikipedia inter-language link
 			
 			; old testing articles
-			;[ "Fruit" "en", nil, 0 ]
-		    ;[ "Stachytarpheta_svensonii" "en", nil, 0 ]
-		   ; [ "Frucht" "de", nil, 0 ]
-		    ;[ "ثمرة" "ar", nil, 0 ] ; - this is not working yet :(
+			;[ "Toran" "en" nil 0]
+			;[ "Fruit" "en" nil 0 ]
+		    ;[ "Stachytarpheta_svensonii" "en" nil 0 ]
+		   ; [ "Frucht" "de" nil 0 ]
+		    ;[ "ثمرة" "ar" nil 0 ] ; - this is not working yet :(
 		  )))
 	(pprint/pprint starting-articles-to-fetch)
 
@@ -621,24 +672,25 @@
 	;(println "%E6%9E%9C%E5%AE%9E")
 	;(comment
 	;(println ( stringify-bytes "果实"))
-	(def link-expand-amount 1) ; how many adjacent articles to add for each topic model.
+	(def link-expand-amount 0) ; how many adjacent articles to add for each topic model.
 	
 	(def prop-links 
 		(map 
 		  (fn [inlistv]
 		    [ (first inlistv) (loop [i 0 elist (nth inlistv 1)]
 			  (if (>= i link-expand-amount) ; how much to expand it?
-				elist
+				(do 
+				  (println "Done getting links")
+				  (println (count elist))
+				  elist)
 				(recur (inc i) (reduce concat (list elist (expand-wiki-list elist))))
 			  )) 
 			] )
 		starting-articles-to-fetch)
 	)
-	; maybe have articles keep a list of its "parent articles"?
-	(pprint/pprint prop-links)
+	
 	; new article format: [ ["title" "lang-short"] {word-count-map}]
-
-
+	
 	; whether or not to expand or not expand when making the topic models (experimental)
 	(def expand false) 
 	
@@ -648,7 +700,7 @@
 	  (if expand 
 	    (map ; expand
 		  (fn [linklsv] 
-			[(first linklsv) ; vector with title and language
+			[(first linklsv) ; starting element is the root article - vector with title and language
 			  (map  ; second part is the expanded bow
 				(fn [n] ; n is the link
 					(if (= (nth n 1) "en")
@@ -674,7 +726,8 @@
 			] 
 		  ) prop-links)
 	  ) ; end if
-	)	
+	)
+	
 	(def file-name-pre 
 	  (if expand
 		"topic-model-expand-"
@@ -683,24 +736,71 @@
 	)
 	
 	(println "Building the language model")
-	(def topicModels (map (fn [linklsv] [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]) articleTopicsBow))
+	;(def mergedWordCounts
+	;  (map 
+	;    (fn [linklsv] 
+	;	  [(first linklsv) (wcount-merge (nth linklsv 1))]
+	;	) 
+	;  articleTopicsBow)
+	;)
+	
+	; divide the merged word counts by how many word count
+	; lists each word appears in the origina list of word counts. 
+	(def mergedWordCountsTfidf
+	  (map 
+	    (fn [linklsv] 
+		  [(first linklsv) 
+			(let [ 
+					merged-counts (wcount-merge (nth linklsv 1))
+					unmerged-list (nth linklsv 1)
+				]
+				(reduce-kv
+				  (fn [m k v]
+				    (let [
+						; num-docs-in must be at least 1, otherwise it would not be in final merged list
+						num-docs-in (reduce + ; sum the result
+							(map 
+							  (fn [unmerged-list-elem]
+							    (if (nil? (get unmerged-list-elem k))
+								  0 ; not present
+								  1 ; present
+								)
+							  )
+							  unmerged-list))
+						]
+					   (assoc m k (/ v num-docs-in)) 
+					)
+				  ) 
+				{} merged-counts)
+			)]
+		) 
+	  articleTopicsBow)
+	)
+
+	;(def topicModels 
+	;  (map 
+	;    (fn [linklsv] 
+	;	  [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]
+	;	) 
+	;  articleTopicsBow)
+	;)
 	
 	(defn write-topic-models [] (map 
 	  (fn [titleModelPair]
-	    ;(pprint/pprint titleModelPair)
 	    (pprint/pprint (str (nth titleModelPair 0)))
-	    ;(pprint/pprint titleModelPair)
 		(write-language-model (clojure.string/join #"" [file-name-pre 
 			(str (clojure.string/join #"-" (reverse (nth titleModelPair 0)))) ".lm"] )
-			(wcount-merge (nth titleModelPair 1)) 
+			(wcount-normalize (nth titleModelPair 1)) ; the first element should be the merged word count list.  
 			(clojure.string/join #" " ["Topic model for" (str (nth titleModelPair 0))] ))
 	  )
-	  topicModels))
+	  mergedWordCountsTfidf))
 	  
 	(println (write-topic-models)) ; this actually runs all the things
 	
 	
 	; TODO: This has to do with calculating results using existing language models. 
+	; need to redefine the documentsBOW variable here. 
+	; need to load in testModels again. 
 	;(def bgModel (read-language-model "google-common-words.lm")) ; load background model
 	;(def bgModelProb 0.7)
 	;(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
