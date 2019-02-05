@@ -644,8 +644,8 @@
 		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
 		  (list 
 		    ; English topic model articles
-			[ "Sport" "en" nil 0 ]
-		    ;[ "Politics" "en" nil 0 ]
+			;[ "Sport" "en" nil 0 ]
+		    [ "Politics" "en" nil 0 ]
 		    ;[ "Science" "en" nil 0 ]
 		    ;[ "Business" "en" nil 0 ]
 		    
@@ -692,7 +692,7 @@
 	; new article format: [ ["title" "lang-short"] {word-count-map}]
 	
 	; whether or not to expand or not expand when making the topic models (experimental)
-	(def expand false) 
+	(def expand true) 
 	
 	(println "Building BOWs. Expand = " expand)
 	; making the Bows with expansion using a dictionary.
