@@ -34,7 +34,7 @@
 		(clojure.string/replace
 			(clojure.string/replace 
 				(clojure.string/trim-newline x) 
-				#"[\|„“\"\.\\,=+%()\$!?<>;'、，،]"   ; comma varients https://en.wikipedia.org/wiki/Comma
+				#"[\|„“\"”“\.\\,=+%()\$!?<>;'、，،]"   ; comma varients https://en.wikipedia.org/wiki/Comma
 				" ")
 			"\n" ; second replace
 			"")))
@@ -57,18 +57,30 @@
 			)
 		)
 	  )
-	  (filter (fn [n] 
-				;(and
-				(not (clojure.string/blank? n)  ;)
-				;(not (nil? (re-matches #"[0-9a-zA-Z]*" n)))
-				;(not (nil? (re-matches #"[a-zA-Z]*" n)))
-			))
-		(map clojure.string/lower-case (map clojure.string/trim (clojure.string/split 
-			(remove-punc (clojure.string/join " " (flatten (iter-down 
-				(flatten (html/select text [:div.mw-body-content :div.mw-parser-output :p])) 
-			)))) ; this is the article
-			#" "
-	  )))))
+	  (filter 
+	    (fn [n] ; get rid of invalid strings
+		  (or
+			(not (clojure.string/blank? n)) ; it is a blank string
+			(< (count n) 1) ; size is less than 1 
+		  )
+		)
+		(map ; this map results in a list of words for the article
+			clojure.string/lower-case 
+			(map clojure.string/trim (clojure.string/split 
+			  (remove-punc 
+				(clojure.string/join " " 
+				  (flatten (iter-down 
+					(flatten 
+					  (html/select text [:div.mw-body-content :div.mw-parser-output :p])
+					) 
+			      )) ; making a list of all the words
+				  ) ; join
+				) 
+			  #" "
+			  )
+			)
+		)
+	  ))
 	)
 )
 	
@@ -645,8 +657,8 @@
 		  (list 
 		    ; English topic model articles
 			;[ "Sport" "en" nil 0 ]
-		    [ "Politics" "en" nil 0 ]
-		    ;[ "Science" "en" nil 0 ]
+		    ;[ "Politics" "en" nil 0 ]
+		    [ "Science" "en" nil 0 ]
 		    ;[ "Business" "en" nil 0 ]
 		    
 			; German topic model articles
