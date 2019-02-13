@@ -87,7 +87,7 @@
 	
 (defn wcount 
 	"count the number of occurances of each word. Returns a dictionary."
-	[wlist]
+	[wlist] ; a list of words
 	(let [mcount_input {}]
 	  (loop [i 0 mcount mcount_input]
 		(if (>= i (count wlist))
@@ -104,6 +104,13 @@
 )
 
 (defn wcount-merge
+	"given a list of word count maps, merge them all together and sum the counts of common words"
+	[wlists]
+	(merge-with + wlists)
+)
+
+
+(defn wcount-merge-old
 	"given a list of word count maps, merge them all together and sum counts"
 	[wlists]
 	;(println wlists)
@@ -154,14 +161,14 @@
 	"get the chance that a word was generated using the given model m."
 	[m w] ; model, word
 	(if (contains? m w)
-		(get m w)
+		(get m w 0) ; return a 0 whenit is not found.
 		0))
 
 (defn count-in-doc
 	"get the count of a word w from a document d."
 	[d w] ; model, word
 	(if (contains? d w)
-		(get d w)
+		(get d w 0)
 		0))
 
 		
@@ -279,7 +286,7 @@
 	    ]
 		;(pprint/pprint zBgModelProbs)
 		;(pprint/pprint zProbs)
-		(if (>= n 10)
+		(if (>= n 10) ; how many iterations there are.
 		  piDocGenByTopic ; output when we're done.
 		  (recur 
 		    (inc n)
@@ -402,7 +409,12 @@
 			m
 			(if (not (or (clojure.string/blank? nextLine) (clojure.string/starts-with? nextLine "#comment#") ))
 			  (let [split-ln (clojure.string/split nextLine #",") 
-					split-val (clojure.string/split (nth split-ln 1) #"/")] ; expects rational number.
+					split-val (do (println split-ln)
+						; TODO: have this handle when a word and its probability 
+						; number is on a different line from model creation error
+						(clojure.string/split (nth split-ln 1) #"/"))
+					
+					] ; expects rational number.
 				(recur (assoc m (nth split-ln 0) 
 				 (if (= 2 (count split-val)) ; if it is a rational number or not.
 					(/ (Integer/parseInt (nth split-val 0)) 
@@ -618,38 +630,44 @@
 (defn is-word-prep-or-article-en 
 	"Return true or false whether the given english 
 	word is an article or preposition."
-	[w]
-	(println "testing " w " english")
-	(let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-en.csv") #"\n") 
+	[inw]
+	(let 
+	  [w (clojure.string/trim inw)]
+	  (println "testing " w " english")
+	  (let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-en.csv") #"\n") 
 	      articles (list "a" "an" "the")]
 		   (or 
+			  (< 1 (count w))
 			  (some (partial = w) prepositions)
 			  (some (partial = w) articles)
 			)
 		)
-	)
+	))
 
 	
 (defn is-word-prep-or-article-de 
 	"Return true or false whether the given german 
 	word is an article or preposition."
-	[w]
+	[inw]
+	(let 
+	  [w (clojure.string/trim inw)]
 	(println "probieren " w " deutsch")
 	(let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-de.csv") #"\n") 
 	      articles (list "ein" "eine" "einem" "einer" "eines" "der" "die" "das" "dem" "den" "des")]
 		   (pprint/pprint prepositions)
 		   (pprint/pprint articles)
 		   (or 
+			  (< 1 (count w))
 			  (some (partial = w) prepositions)  ; https://www.programming-idioms.org/idiom/12/check-if-list-contains-a-value/807/clojure
 			  (some (partial = w) articles)
 			)
 		)
-	)
+	))
+
 	
-(defn -main
-  "main function."
-  [& args]
-  (do
+(defn build-topic-models-main
+	"build topic models main function"
+	[args]
 	; format of the articles: [ ["title" "lang-short"], parent, depth ]
    (def starting-articles-to-fetch 
      (map
@@ -748,14 +766,7 @@
 	)
 	
 	(println "Building the language model")
-	;(def mergedWordCounts
-	;  (map 
-	;    (fn [linklsv] 
-	;	  [(first linklsv) (wcount-merge (nth linklsv 1))]
-	;	) 
-	;  articleTopicsBow)
-	;)
-	
+
 	; divide the merged word counts by how many word count
 	; lists each word appears in the origina list of word counts. 
 	(def mergedWordCountsTfidf
@@ -789,14 +800,6 @@
 	  articleTopicsBow)
 	)
 
-	;(def topicModels 
-	;  (map 
-	;    (fn [linklsv] 
-	;	  [(first linklsv) (mapv wcount-normalize (nth linklsv 1))]
-	;	) 
-	;  articleTopicsBow)
-	;)
-	
 	(defn write-topic-models [] (map 
 	  (fn [titleModelPair]
 	    (pprint/pprint (str (nth titleModelPair 0)))
@@ -809,23 +812,89 @@
 	  
 	(println (write-topic-models)) ; this actually runs all the things
 	
-	
-	; TODO: This has to do with calculating results using existing language models. 
-	; need to redefine the documentsBOW variable here. 
-	; need to load in testModels again. 
-	;(def bgModel (read-language-model "google-common-words.lm")) ; load background model
-	;(def bgModelProb 0.7)
-	;(def vocabulary (distinct (flatten [(map keys documentsBows) (keys bgModel) (flatten (map keys testBows))] )))
-	
-	;(pprint/pprint (topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
-	
-	
-	
 	; code to make the background model.
 	;(def google-word-list (clojure.string/split (load-word-file-as-list "google-10000-english.txt") #"\n") )
 	;(def google-bg-model (wcount-normalize (wcount google-word-list)))
 	;(write-language-model "google-common-words.lm" google-bg-model "The 10000 most common english words")
-	
-	
-	;(do (mg/disconnect md-conn))
-))
+) ; end build topic model function
+
+
+(defn evaluate-topic-main
+	"build topic models main function"
+	[args]
+	(println args)
+	(let 
+	  [
+ 	    bgfile (first args) ; background model file
+	    infiles (rest args) ; input files
+	  ]
+		(println "in files names:")
+		(pprint/pprint infiles)
+		(println "background file name:")
+		(pprint/pprint bgfile)
+		; new article format: [ ["title" "lang-short"] {word-count-map}]
+		
+		; TODO: This has to do with calculating results using existing language models. 
+		; need to redefine the documentsBOW variable here. 
+		(def documentsBows
+		  (map 
+		    (fn [file] ; load file, remove punctuation, and make the word count map
+			   (wcount 
+			     (map 
+				   remove-punc 
+			       (clojure.string/split (load-word-file-as-list file) #"\n")))
+			)
+		  infiles)
+		)
+		
+		(pprint/pprint documentsBows)
+		
+		; need to load in testModels again. 
+		(def testModels
+		   [
+			  (read-language-model "topic-model-expand-en-Politics.lm")
+			  (read-language-model "topic-model-expand-en-Sport.lm")
+		   ])
+		
+		(def bgModel 
+		  (read-language-model bgfile)) ; load background model
+		(def bgModelProb 0.7)
+		(def vocabulary 
+		  (distinct 
+			(flatten 
+			  [
+			    (map keys documentsBows) 
+				(keys bgModel) 
+				(flatten 
+				  (map keys testModels)
+				)
+			  ]
+			)))
+		
+		(pprint/pprint 
+			(topic-probs documentsBows vocabulary testModels bgModel bgModelProb))
+		
+		
+		; code to make the background model.
+		; (def google-word-list (clojure.string/split (load-word-file-as-list "google-100-english.txt") #"\n") )
+		; (def google-bg-model (wcount-normalize (wcount google-word-list)))
+		; (write-language-model "google-common-words-small.lm" google-bg-model "The 10000 most common english words")
+	)
+)
+
+(defn -main
+  "main function."
+  [& args]
+  ; first argument is the mode
+  ; b is building
+  ; e is evaluating
+  (do 
+	(println args)
+	(if (= (first args) "b")
+	  (build-topic-models-main (rest args))
+	  (if (= (first args) "e") 
+		(evaluate-topic-main (rest args))
+		nil
+	  )
+  ))
+)
