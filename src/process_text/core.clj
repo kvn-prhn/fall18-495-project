@@ -400,30 +400,37 @@
 
 
 (defn read-language-model 
-  "given a file name, read and write the langauge model to file."
+  "given a file name, read the language model"
   [fname]
   (with-open [rdr (clojure.java.io/reader fname)]
 	(loop [m {}]
 	  (let [nextLine (.readLine rdr)] 
-	     (if (nil? nextLine)
+	     (if (nil? nextLine) ; test eof
+			   ; end if test to see if the line is valid to read in
 			m
-			(if (not (or (clojure.string/blank? nextLine) (clojure.string/starts-with? nextLine "#comment#") ))
-			  (let [split-ln (clojure.string/split nextLine #",") 
-					split-val (do (println split-ln)
-						; TODO: have this handle when a word and its probability 
-						; number is on a different line from model creation error
-						(clojure.string/split (nth split-ln 1) #"/"))
-					
-					] ; expects rational number.
-				(recur (assoc m (nth split-ln 0) 
-				 (if (= 2 (count split-val)) ; if it is a rational number or not.
-					(/ (Integer/parseInt (nth split-val 0)) 
-					  (Integer/parseInt (nth split-val 1)) ) ; if so, divide the two numbers
-				    (Integer/parseInt (first split-val)) ; otherwise just include the number
+			(let [nextTerm 
+					(clojure.string/replace 
+					  (if (and (not (clojure.string/starts-with? nextLine "#comment#")) ; don't read two lines if it is a comment line
+						  (nil? (re-find #"((.)*\n?,[0-9]+(\/[0-9]+)?)" nextLine)))
+					    (clojure.string/join #"" [nextLine (.readLine rdr)]) ; append the next line to this one if invalid
+					    nextLine ; if the line is valid, then don't append the next line.
+				 	  ) #"[\r\n]" " ") ; replace new lines with spaces
+				 ]
+			  (if (and (not (clojure.string/blank? nextTerm)) ; ignore blank terms
+					  (clojure.string/includes? nextTerm ",")) ; double check comma present
+			    (let [split-commas (clojure.string/split nextTerm #",")
+					  split-ln  ; last token is the number while the remaining is the term. This is for terms that contain commas.
+						(list (clojure.string/join #"," (drop-last split-commas)) (last split-commas))
+					  split-val (clojure.string/split (nth split-ln 1) #"/") ; expects rational number.
+					]
+				 (recur (assoc m (nth split-ln 0) 
+				   (if (= 2 (count split-val)) ; if it is a rational number or not (splitting by / gave two parts)
+					  (/ (Integer/parseInt (nth split-val 0)) (Integer/parseInt (nth split-val 1)) ) ; if so, divide the two numbers
+				     (Integer/parseInt (first split-val)) ; otherwise just include the number
 				  )
 			    )))
-			  (recur m)
-			)
+			  (recur m) ; if the term was valid, continue iterating and reading.
+			))
 		 )))
   ))
 
@@ -826,7 +833,7 @@
 	(let 
 	  [
  	    bgfile (first args) ; background model file
-	    infiles (rest args) ; input files
+	    infiles (rest args) ; & input files
 	  ]
 		(println "in files names:")
 		(pprint/pprint infiles)
