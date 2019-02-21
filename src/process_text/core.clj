@@ -38,6 +38,19 @@
 				" ")
 			"\n" ; second replace
 			"")))
+			
+(defn ignore-word-filter
+	"returns true if a given word should be ignored, or false if not"
+	[inw]
+	(let [strinw (str inw)] 
+	  (println strinw)
+	  (or (clojure.string/blank? strinw)
+		(clojure.string/includes? strinw "]")
+		(clojure.string/includes? strinw "[")
+		(clojure.string/includes? strinw "}")
+		(clojure.string/includes? strinw "{")
+		(clojure.string/includes? strinw ":")
+	)))
 
 (defn url-encode [s] (java.net.URLEncoder/encode s "UTF-8"))
 			
@@ -92,8 +105,8 @@
 	  (loop [i 0 mcount mcount_input]
 		(if (>= i (count wlist))
 		  mcount
-		  (if (symbol? (get mcount (nth wlist i)))
-		    (recur (inc i) mcount) ; don't add symbols
+		  (if (ignore-word-filter (nth wlist i)) ; if the word should be ignored...
+		    (recur (inc i) mcount) ; then don't add to the word count.
 		    (recur (inc i) (if (nil? (get mcount (nth wlist i)))
 			  (assoc mcount (nth wlist i) 1)
 			  (update mcount (nth wlist i) inc)
@@ -459,41 +472,54 @@
 	[v source-dict target-dict ignore-pred] ;[title lang-short, parent, level ]
 	(let [srcdoc (wiki-url-to-document v)]
 	  ; take source document and expand each word, adding the result to a resulting document.
-	  (let [ resultdoc (for [word srcdoc] 
-		  (if (not (ignore-pred word)) ; ignore words from the ignore-pred
-			(future (let [
-					md-conn (mg/connect) ; each thread has its own connection.
-					md-dictionaries (mg/get-db md-conn "dictionaries")
-					twords (source-dict md-dictionaries word)]
-				(if (nil? twords)
-				  (doall 
-					(mg/disconnect md-conn)
-					(list word) ; don't change the word if it has no translations
-				  ) ; end true result
-				  (doall
-					(let [res-words (do (flatten (map ; expand the translation list with source translations
-					  (fn [tw]
-						(target-dict md-dictionaries tw))
-					  twords) 
-					))]
-					  (mg/disconnect md-conn) 
-					  (conj res-words word) ; add the original word to the result.
-					)
-				  ) ; end false result.
-				)
-			  )); end future
-			(list word) ; just return the word if it is an ignored one.
-		  )
-		) 	]
+	  (let [ 
+	    number-of-connections 10 ; guess how many threads that will run
+	    number-of-words-per-thread (inc (int (/ (count srcdoc) number-of-connections))) ; round up
+		resultdoc 
+	    (for [word-colls (partition number-of-words-per-thread srcdoc)] ; for each word in the source doc... 
+			(future 
+				(let [ ; each collection of words has its own future/thread
+				  md-conn (mg/connect) ; each thread has its own connection.
+				  md-dictionaries (mg/get-db md-conn "dictionaries")
+				] 
+				(let [res-colls 
+					(for [word word-colls] ; expand this word
+					  (doall 
+						(println word)
+						(if (not (ignore-pred word))
+						  (let [twords (source-dict md-dictionaries word)]
+							(if (nil? twords) 
+							  (list word) ; don't change the word if it has no translation found.
+							  (let [res-words (do 
+								(flatten 
+								  (map ; expand the translation list with source translations
+									(fn [tw]
+									  (target-dict md-dictionaries tw))
+								  twords) 
+								))] 
+								(conj res-words word) ; add the original word to the result.
+							  )
+							)
+						  )
+						  (list word) ; just return the word if it is an ignored one.
+					  )) ) ] ; map for each word in this thread's collection
+			  (doall 
+			    (mg/disconnect md-conn) ; need to close connection to free it waiting threads.
+			    res-colls)
+			  )
+		    )); end future 
+		)	]
 		(let [ resultdocNotified 
-			(flatten 
+			;(flatten 
 			  (map 
 				(fn [n]
 				  (if (future? n)
 				    @n   ; wait for the future if it is a future.
 					n)) 
-			   resultdoc)) ]
-		  ; (println resultdoc)
+			   resultdoc)
+			   ;) 
+			 ]
+		  (println resultdoc)
 		  (wcount resultdocNotified)
 		)
 	  )
@@ -683,7 +709,7 @@
 		    ; English topic model articles
 			;[ "Sport" "en" nil 0 ]
 		    ;[ "Politics" "en" nil 0 ]
-		    [ "Science" "en" nil 0 ]
+		    ;[ "Science" "en" nil 0 ]
 		    ;[ "Business" "en" nil 0 ]
 		    
 			; German topic model articles
@@ -693,6 +719,7 @@
 		    ;[ "Geschäft_(Wirtschaft)" "de" nil 0 ] ; NOT a wikipedia inter-language link
 			
 			; old testing articles
+			[ "Kumo_to_Tulip" "en" nil 0]
 			;[ "Toran" "en" nil 0]
 			;[ "Fruit" "en" nil 0 ]
 		    ;[ "Stachytarpheta_svensonii" "en" nil 0 ]
@@ -741,9 +768,21 @@
 			  (map  ; second part is the expanded bow
 				(fn [n] ; n is the link
 					(if (= (nth n 1) "en")
-						(wiki-url-to-bow-expand n en-to-de-dict de-to-en-dict is-word-prep-or-article-en)
+						(wiki-url-to-bow-expand n 
+							en-to-de-dict 
+							de-to-en-dict 
+							(fn [w]
+							  (or (is-word-prep-or-article-en w)
+								(ignore-word-filter w))
+							))
 						(if (= (nth n 1) "de")
-						  (wiki-url-to-bow-expand n de-to-en-dict en-to-de-dict is-word-prep-or-article-de)
+						  (wiki-url-to-bow-expand n 
+							de-to-en-dict 
+							en-to-de-dict 
+							(fn [w]
+							  (or (is-word-prep-or-article-de w)
+								(ignore-word-filter w))
+							))
 						   (wiki-url-to-bow n) ; can't expand that language, so do normally
 						)
 					)
@@ -783,25 +822,28 @@
 			(let [ 
 					merged-counts (wcount-merge (nth linklsv 1))
 					unmerged-list (nth linklsv 1)
-				]
-				(reduce-kv
-				  (fn [m k v]
-				    (let [
-						; num-docs-in must be at least 1, otherwise it would not be in final merged list
-						num-docs-in (reduce + ; sum the result
-							(map 
-							  (fn [unmerged-list-elem]
-							    (if (nil? (get unmerged-list-elem k))
-								  0 ; not present
-								  1 ; present
-								)
-							  )
-							  unmerged-list))
-						]
-					   (assoc m k (/ v num-docs-in)) 
-					)
-				  ) 
-				{} merged-counts)
+				] 
+				(if (> (count merged-counts) 1) ; if there is more than one document count...
+					(reduce-kv
+					  (fn [m k v]
+						(let [
+							; num-docs-in must be at least 1, otherwise it would not be in final merged list
+							num-docs-in (reduce + ; sum the result
+								(map 
+								  (fn [unmerged-list-elem]
+									(if (nil? (get unmerged-list-elem k))
+									  0 ; not present
+									  1 ; present
+									)
+								  )
+								  unmerged-list))
+							]
+						   (assoc m k (/ v num-docs-in)) 
+						)
+					  ) 
+					{} merged-counts)
+					(first merged-counts) ; otherwise if there is only one map just return it
+				)
 			)]
 		) 
 	  articleTopicsBow)
