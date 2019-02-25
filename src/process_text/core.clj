@@ -510,13 +510,15 @@
 	    number-of-words-per-thread (inc (int (/ (count srcdoc) number-of-connections))) ; round up
 		] 
 		(wcount (flatten 
-		  (map deref 
-			 (map 
-			    (fn [word-coll] ; [word-coll]
-  				  (future	
-			        (let [ md-conn (mg/connect) 
-						md-dictionaries (mg/get-db md-conn "dictionaries") ]
-					  (locking md-dictionaries 
+		  (let [word-collections (partition number-of-words-per-thread srcdoc)
+			       workers (map (fn [n] (agent n)) word-collections)  ] ; make a list of agents
+				; dispatch agents
+				(doseq [worker workers]
+				  (send-off worker
+					(fn [word-coll]
+					  (let [ md-conn (mg/connect) 
+						     md-dictionaries (mg/get-db md-conn "dictionaries") ]
+					  ;(locking md-dictionaries 
 						(for [word word-coll] 
 						  (if (ignore-pred word)
 						    (list word) ; just return the word if it is an ignored one.
@@ -534,13 +536,20 @@
 						    )
 					      )
 						) ; end for word-coll
-					  ) ; end locking
-					)
-				  ) ; end future
-			    )
-				(partition number-of-words-per-thread srcdoc)
-			  )
-			)))
+					  ;) ; end locking
+					))
+				  ) ; end send-off
+				)
+				; await for agents and get the results. 
+				(map
+				  (fn [a] 
+				    (do 
+					  (await a)
+					  @a
+					))
+				workers)
+			)
+		)) ; flatten and wcount
 	  )
 	))
 	
