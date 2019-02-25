@@ -43,19 +43,21 @@
 	"returns true if a given word should be ignored, or false if not"
 	[inw]
 	(let [w (str inw)] 
-	  (println (.getName (Thread/currentThread)) " ignore-word-filter testing '" w "'= "
+	  ;(println (.getName (Thread/currentThread)) " ignore-word-filter testing '" w "'= "
 	  (or (clojure.string/blank? w)
 		(clojure.string/includes? w "]")
 		(clojure.string/includes? w "[")
 		(clojure.string/includes? w "}")
 		(clojure.string/includes? w "{")
 		(clojure.string/includes? w ":")
-		(or (map
-		    (fn [o] (= w o))
-			["the" "an" "a" "is" "and" "by" "of" "der" "die" "das" "den" "dem" "des"]
-		  ))
-		)
-	)))
+		(= w "the")
+		(= w "a")
+		(= w "an")
+		(= w "is")
+		(= w "and")
+		(= w "of")) 
+	;)
+	))
 
 (defn url-encode [s] (java.net.URLEncoder/encode s "UTF-8"))
 			
@@ -509,35 +511,34 @@
 		] 
 		(wcount (flatten 
 		  (map deref 
-			 (for [word-coll (partition number-of-words-per-thread srcdoc)]
-			   (let [ md-conn (mg/connect) ]
-			     (future 
-					(println (count word-coll))
-					(locking md-conn
-					  (for [word word-coll] 
-						  (pprint/pprint (if (not (ignore-pred word))
-						  (let [md-dictionaries (mg/get-db md-conn "dictionaries") 
-						       twords (source-dict md-dictionaries word)]
-							(if (nil? twords) 
-							  (do (println "no translation found" word) (list word)) ; don't change the word if it has no translation found.
-							  (let [res-words (do 
-								(pprint/pprint twords)
-								(flatten 
-								  (map ; expand the translation list with source translations
-									(fn [tw]
-									  (target-dict md-dictionaries tw))
-								  twords) 
-								))] 
-								(conj res-words word) ; add the original word to the result.
+			 (map 
+			    (fn [word-coll] ; [word-coll]
+  				  (future	
+			        (let [ md-conn (mg/connect) 
+						md-dictionaries (mg/get-db md-conn "dictionaries") ]
+					  (locking md-dictionaries 
+						(for [word word-coll] 
+						  (if (ignore-pred word)
+						    (list word) ; just return the word if it is an ignored one.
+						    (let [twords (source-dict md-dictionaries word)]
+							  (if (nil? twords) 
+							    (do (println "no translation found" word) (list word)) ; don't change the word if it has no translation found.
+							    (let [res-words (flatten 
+								        (for [tw twords] ; expand the translation list with source translations
+									      (target-dict md-dictionaries tw)
+								        ) 
+								      )] 
+								  (conj res-words word) ; add the original word to the result.
+							    )
 							  )
-							)
-						  )
-						  (list word) ; just return the word if it is an ignored one.
-					     ))
-					  )
+						    )
+					      )
+						) ; end for word-coll
+					  ) ; end locking
 					)
 				  ) ; end future
 			    )
+				(partition number-of-words-per-thread srcdoc)
 			  )
 			)))
 	  )
@@ -615,7 +616,7 @@
 ; the _id, word (string) and translations (array of strings). 
 ; There will be an index over the field "word"
 
-(def expand-amount 4)
+(def expand-amount 3)
 
 (defn en-to-de-dict 
 	"Given a word in english, return a list of
