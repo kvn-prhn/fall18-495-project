@@ -42,14 +42,19 @@
 (defn ignore-word-filter
 	"returns true if a given word should be ignored, or false if not"
 	[inw]
-	(let [strinw (str inw)] 
-	  (println strinw)
-	  (or (clojure.string/blank? strinw)
-		(clojure.string/includes? strinw "]")
-		(clojure.string/includes? strinw "[")
-		(clojure.string/includes? strinw "}")
-		(clojure.string/includes? strinw "{")
-		(clojure.string/includes? strinw ":")
+	(let [w (str inw)] 
+	  (println (.getName (Thread/currentThread)) " ignore-word-filter testing '" w "'= "
+	  (or (clojure.string/blank? w)
+		(clojure.string/includes? w "]")
+		(clojure.string/includes? w "[")
+		(clojure.string/includes? w "}")
+		(clojure.string/includes? w "{")
+		(clojure.string/includes? w ":")
+		(or (map
+		    (fn [o] (= w o))
+			["the" "an" "a" "is" "and" "by" "of" "der" "die" "das" "den" "dem" "des"]
+		  ))
+		)
 	)))
 
 (defn url-encode [s] (java.net.URLEncoder/encode s "UTF-8"))
@@ -116,17 +121,16 @@
 	))
 )
 
-(defn wcount-merge
+(defn wcount-merge-alternative
 	"given a list of word count maps, merge them all together and sum the counts of common words"
 	[wlists]
 	(merge-with + wlists)
 )
 
 
-(defn wcount-merge-old
+(defn wcount-merge
 	"given a list of word count maps, merge them all together and sum counts"
-	[wlists]
-	;(println wlists)
+	[wlists] 
 	(reduce 
 		(fn [wlist1 wlist2] 
 			(loop [result wlist1 q wlist2]
@@ -299,7 +303,7 @@
 	    ]
 		;(pprint/pprint zBgModelProbs)
 		;(pprint/pprint zProbs)
-		(if (>= n 10) ; how many iterations there are.
+		(if (>= n 25) ; how many iterations there are. not sure how to measure convergence here, so just doing a flat 25 iterations
 		  piDocGenByTopic ; output when we're done.
 		  (recur 
 		    (inc n)
@@ -463,6 +467,33 @@
 	[v] ;[title lang-short, parent, level ]
 	(wcount (wiki-url-to-document v)))
 
+
+(defn expand-word
+	"Given a connection to the dictionary database, a source and target dictionary,
+	 a ignore predicate, and a word, expand the word using the dictionaries."
+	[inword md-dictionaries source-dict target-dict ignore-pred]
+	(let [word (clojure.string/trim inword)]
+	 (pprint/pprint (if (not (ignore-pred word))
+	  (let [twords (source-dict md-dictionaries word)]
+		(if (nil? twords) 
+		  (do (println "no translation found" word) (list word)) ; don't change the word if it has no translation found.
+		  (let [res-words (do 
+		    (pprint/pprint twords)
+			(flatten 
+			  (map ; expand the translation list with source translations
+				(fn [tw]
+				  (target-dict md-dictionaries tw))
+			  twords) 
+			))] 
+			(conj res-words word) ; add the original word to the result.
+		  )
+		)
+	  )
+	  (list word) ; just return the word if it is an ignored one.
+   ))
+  )
+)
+	
 ; Experimental version - expanding the documents with bilingual dictionary.
 (defn wiki-url-to-bow-expand
 	"Given a wikipedia title and language, convert the article to a Bag of Words with counts.
@@ -475,22 +506,22 @@
 	  (let [ 
 	    number-of-connections 10 ; guess how many threads that will run
 	    number-of-words-per-thread (inc (int (/ (count srcdoc) number-of-connections))) ; round up
-		resultdoc 
-	    (for [word-colls (partition number-of-words-per-thread srcdoc)] ; for each word in the source doc... 
-			(future 
-				(let [ ; each collection of words has its own future/thread
-				  md-conn (mg/connect) ; each thread has its own connection.
-				  md-dictionaries (mg/get-db md-conn "dictionaries")
-				] 
-				(let [res-colls 
-					(for [word word-colls] ; expand this word
-					  (doall 
-						(println word)
-						(if (not (ignore-pred word))
-						  (let [twords (source-dict md-dictionaries word)]
+		] 
+		(wcount (flatten 
+		  (map deref 
+			 (for [word-coll (partition number-of-words-per-thread srcdoc)]
+			   (let [ md-conn (mg/connect) ]
+			     (future 
+					(println (count word-coll))
+					(locking md-conn
+					  (for [word word-coll] 
+						  (pprint/pprint (if (not (ignore-pred word))
+						  (let [md-dictionaries (mg/get-db md-conn "dictionaries") 
+						       twords (source-dict md-dictionaries word)]
 							(if (nil? twords) 
-							  (list word) ; don't change the word if it has no translation found.
+							  (do (println "no translation found" word) (list word)) ; don't change the word if it has no translation found.
 							  (let [res-words (do 
+								(pprint/pprint twords)
 								(flatten 
 								  (map ; expand the translation list with source translations
 									(fn [tw]
@@ -502,26 +533,13 @@
 							)
 						  )
 						  (list word) ; just return the word if it is an ignored one.
-					  )) ) ] ; map for each word in this thread's collection
-			  (doall 
-			    (mg/disconnect md-conn) ; need to close connection to free it waiting threads.
-			    res-colls)
+					     ))
+					  )
+					)
+				  ) ; end future
+			    )
 			  )
-		    )); end future 
-		)	]
-		(let [ resultdocNotified 
-			;(flatten 
-			  (map 
-				(fn [n]
-				  (if (future? n)
-				    @n   ; wait for the future if it is a future.
-					n)) 
-			   resultdoc)
-			   ;) 
-			 ]
-		  (println resultdoc)
-		  (wcount resultdocNotified)
-		)
+			)))
 	  )
 	))
 	
@@ -597,7 +615,7 @@
 ; the _id, word (string) and translations (array of strings). 
 ; There will be an index over the field "word"
 
-(def expand-amount 3)
+(def expand-amount 4)
 
 (defn en-to-de-dict 
 	"Given a word in english, return a list of
@@ -605,12 +623,10 @@
 	[md-db word]
 	;(println "translating " word)
 	; try to find the word by itself and with "to " in front of it for possible verbs 
-	(let [ret (mc/find-maps md-db "en_de_dict" { :word word })
-		 ret_with_to (mc/find-maps md-db "en_de_dict" { :word (clojure.string/join #" " ["to" word]) })]
+	(let [ret (mc/find-maps md-db "en_de_dict" { :word word })]
 		; convert the map into a list of all possible translations
 		(take expand-amount (distinct (concat 
 		  (flatten (map (fn [w] (get w :translations)) ret))
-		  (flatten (map (fn [w] (get w :translations)) ret_with_to))
 		)))
 	)
 )
@@ -665,16 +681,16 @@
 	word is an article or preposition."
 	[inw]
 	(let 
-	  [w (clojure.string/trim inw)]
-	  (println "testing " w " english")
+	  [w (str inw)]
+	  (println "testing is word prep or article '" w "' = "
 	  (let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-en.csv") #"\n") 
 	      articles (list "a" "an" "the")]
 		   (or 
 			  (< 1 (count w))
-			  (some (partial = w) prepositions)
+			  ;(some (partial = w) prepositions)
 			  (some (partial = w) articles)
 			)
-		)
+		))
 	))
 
 	
@@ -684,11 +700,11 @@
 	[inw]
 	(let 
 	  [w (clojure.string/trim inw)]
-	(println "probieren " w " deutsch")
+	;(println "probieren " w " deutsch")
 	(let [prepositions (clojure.string/split (load-word-file-as-list "prepositions-de.csv") #"\n") 
 	      articles (list "ein" "eine" "einem" "einer" "eines" "der" "die" "das" "dem" "den" "des")]
-		   (pprint/pprint prepositions)
-		   (pprint/pprint articles)
+		   ;(pprint/pprint prepositions)
+		   ;(pprint/pprint articles)
 		   (or 
 			  (< 1 (count w))
 			  (some (partial = w) prepositions)  ; https://www.programming-idioms.org/idiom/12/check-if-list-contains-a-value/807/clojure
@@ -744,7 +760,7 @@
 		    [ (first inlistv) (loop [i 0 elist (nth inlistv 1)]
 			  (if (>= i link-expand-amount) ; how much to expand it?
 				(do 
-				  (println "Done getting links")
+				  (println "Done getting links: " (str (first inlistv)) )
 				  (println (count elist))
 				  elist)
 				(recur (inc i) (reduce concat (list elist (expand-wiki-list elist))))
@@ -771,18 +787,22 @@
 						(wiki-url-to-bow-expand n 
 							en-to-de-dict 
 							de-to-en-dict 
-							(fn [w]
-							  (or (is-word-prep-or-article-en w)
-								(ignore-word-filter w))
-							))
+							ignore-word-filter
+							;(fn [w]
+							;  (or (is-word-prep-or-article-en w)
+							;	(ignore-word-filter w))
+							;)
+							)
 						(if (= (nth n 1) "de")
 						  (wiki-url-to-bow-expand n 
 							de-to-en-dict 
-							en-to-de-dict 
-							(fn [w]
-							  (or (is-word-prep-or-article-de w)
-								(ignore-word-filter w))
-							))
+							en-to-de-dict  
+							ignore-word-filter
+							;(fn [w]
+							;  (or (is-word-prep-or-article-de w)
+							;	(ignore-word-filter w))
+							;)
+							)
 						   (wiki-url-to-bow n) ; can't expand that language, so do normally
 						)
 					)
@@ -805,9 +825,16 @@
 	)
 	
 	(def file-name-pre 
-	  (if expand
-		"topic-model-expand-"
-		"topic-model-"
+	  (clojure.string/join 
+	    ""
+		[
+		  (if expand
+		    "topic-model-expand-"
+		    "topic-model-"
+	      )
+		  (str link-expand-amount)
+		  "-"
+		] 
 	  )
 	)
 	
@@ -851,7 +878,6 @@
 
 	(defn write-topic-models [] (map 
 	  (fn [titleModelPair]
-	    (pprint/pprint (str (nth titleModelPair 0)))
 		(write-language-model (clojure.string/join #"" [file-name-pre 
 			(str (clojure.string/join #"-" (reverse (nth titleModelPair 0)))) ".lm"] )
 			(wcount-normalize (nth titleModelPair 1)) ; the first element should be the merged word count list.  
@@ -896,7 +922,7 @@
 		  infiles)
 		)
 		
-		(pprint/pprint documentsBows)
+		;(pprint/pprint documentsBows)
 		
 		; need to load in testModels again. 
 		(def testModels
