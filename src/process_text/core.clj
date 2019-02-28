@@ -506,17 +506,19 @@
 	(let [srcdoc (wiki-url-to-document v)]
 	  ; take source document and expand each word, adding the result to a resulting document.
 	  (let [ 
-	    number-of-connections 10 ; guess how many threads that will run
+	    number-of-connections 20 ; guess how many threads that will run
 	    number-of-words-per-thread (inc (int (/ (count srcdoc) number-of-connections))) ; round up
 		] 
 		(wcount (flatten 
-		  (map deref 
-			 (map 
-			    (fn [word-coll] ; [word-coll]
-  				  (future	
-			        (let [ md-conn (mg/connect) 
-						md-dictionaries (mg/get-db md-conn "dictionaries") ]
-					  (locking md-dictionaries 
+		  (let [word-collections (partition number-of-words-per-thread srcdoc)
+			       workers (map (fn [n] (agent n)) word-collections)  ] ; make a list of agents
+				; dispatch agents
+				(doseq [worker workers]
+				  (send-off worker
+					(fn [word-coll]
+					  (let [ md-conn (mg/connect) 
+						     md-dictionaries (mg/get-db md-conn "dictionaries") ]
+					  (locking md-conn 
 						(for [word word-coll] 
 						  (if (ignore-pred word)
 						    (list word) ; just return the word if it is an ignored one.
@@ -535,12 +537,20 @@
 					      )
 						) ; end for word-coll
 					  ) ; end locking
-					)
-				  ) ; end future
-			    )
-				(partition number-of-words-per-thread srcdoc)
-			  )
-			)))
+					  ;(doall (mg/disconnect md-conn)) ; disconnect currernt db connection
+					))
+				  ) ; end send-off
+				)
+				; await for agents and get the results. 
+				(map
+				  (fn [a] 
+				    (do 
+					  (await-for 30000 a)
+					  @a
+					))
+				workers)
+			)
+		)) ; flatten and wcount
 	  )
 	))
 	
@@ -717,12 +727,29 @@
 	
 (defn build-topic-models-main
 	"build topic models main function"
-	[args]
+	[args] ; expand  link-expand-amount  language  & articles  
 	; format of the articles: [ ["title" "lang-short"], parent, depth ]
-   (def starting-articles-to-fetch 
-     (map
-		(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
-		  (list 
+	(println args)
+   (let [
+		  link-expand-amount (Integer/parseInt (first args)) ; how many adjacent articles to add for each topic model.
+		  expand (Boolean/parseBoolean (nth args 1)) ; whether or not to expand or not expand when making the topic models (experimental)
+		  language-tag (nth args 2)
+		  article-names (nthrest args 3)
+		  starting-articles-to-fetch (map 
+			(fn [a]
+			  [ [a language-tag] (list [a language-tag nil 0])]
+			)
+			article-names)
+		]
+   (println "link-expand-amount" link-expand-amount)
+   (println "expand" expand)
+   (println "language-tag" language-tag)
+   (println "article-names" article-names)
+   
+   ;(def starting-articles-to-fetch 
+    ; (map
+	;	(fn [n] [ [(first n) (nth n 1)] (list n)])  ; 2 item vector of a list and the title-language pair
+	;	  (list 
 		    ; English topic model articles
 			;[ "Sport" "en" nil 0 ]
 		    ;[ "Politics" "en" nil 0 ]
@@ -733,16 +760,16 @@
 			;[ "Sport" "de" nil 0 ]
 		    ;[ "Politik" "de" nil 0 ]
 		    ;[ "Wissenschaft" "de" nil 0 ]
-		    ;[ "Geschäft_(Wirtschaft)" "de" nil 0 ] ; NOT a wikipedia inter-language link
+		    ;[ "Gesch%C3%A4ft_(Wirtschaft)" "de" nil 0 ] ; NOT a wikipedia inter-language link
 			
 			; old testing articles
-			[ "Kumo_to_Tulip" "en" nil 0]
+	;		[ "Kumo_to_Tulip" "en" nil 0]
 			;[ "Toran" "en" nil 0]
 			;[ "Fruit" "en" nil 0 ]
 		    ;[ "Stachytarpheta_svensonii" "en" nil 0 ]
 		   ; [ "Frucht" "de" nil 0 ]
 		    ;[ "ثمرة" "ar" nil 0 ] ; - this is not working yet :(
-		  )))
+	;	  )))
 	(pprint/pprint starting-articles-to-fetch)
 
 	;(println "ثمرة")
@@ -752,8 +779,7 @@
 	;(println (new java.lang.String (.getBytes "ثمرة") "US-ASCII")) ; encode it to ascii characters. 
 	;(println "%E6%9E%9C%E5%AE%9E")
 	;(comment
-	;(println ( stringify-bytes "果实"))
-	(def link-expand-amount 0) ; how many adjacent articles to add for each topic model.
+	;(println ( stringify-bytes "果实")) 
 	
 	(def prop-links 
 		(map 
@@ -771,10 +797,7 @@
 	)
 	
 	; new article format: [ ["title" "lang-short"] {word-count-map}]
-	
-	; whether or not to expand or not expand when making the topic models (experimental)
-	(def expand true) 
-	
+		
 	(println "Building BOWs. Expand = " expand)
 	; making the Bows with expansion using a dictionary.
 	(def articleTopicsBow
@@ -892,11 +915,11 @@
 	;(def google-word-list (clojure.string/split (load-word-file-as-list "google-10000-english.txt") #"\n") )
 	;(def google-bg-model (wcount-normalize (wcount google-word-list)))
 	;(write-language-model "google-common-words.lm" google-bg-model "The 10000 most common english words")
-) ; end build topic model function
+)) ; end build topic model function
 
 
 (defn evaluate-topic-main
-	"build topic models main function"
+	"evaluate topic of documents main function"
 	[args]
 	(println args)
 	(let 
